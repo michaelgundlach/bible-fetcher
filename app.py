@@ -30,39 +30,72 @@ def get_bible_passage(passage, version):
         return f"Error: {e}"
 
 # --- Simple HTML Template ---
+# --- Updated HTML Template with Spinner ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
     <title>Bible Passage Fetcher</title>
     <style>
-        body { font-family: sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
-        input[type="text"] { width: 300px; padding: 8px; }
-        button { padding: 8px 16px; cursor: pointer; }
-        .result { background: #f4f4f4; padding: 20px; border-radius: 8px; margin-top: 20px; }
-        h3 { border-bottom: 2px solid #ddd; padding-bottom: 5px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #333; }
+        input[type="text"] { width: 250px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 10px; }
+        button { padding: 10px 20px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
+        button:hover { background-color: #0056b3; }
+        .result { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-top: 20px; border-left: 5px solid #007bff; }
+        h3 { margin-top: 0; color: #007bff; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+
+        /* The Spinner CSS */
+        #spinner { display: none; margin-top: 20px; }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            vertical-align: middle;
+            margin-right: 10px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
     <h2>📖 Bible Passage Fetcher</h2>
-    <form method="POST">
-        <input type="text" name="passage" placeholder="e.g. John 8:12-20" required value="{{ passage }}">
-        <input type="text" name="versions" placeholder="e.g. KOERV, NIV, NASB" required value="{{ versions_str }}">
-        <button type="submit">Fetch</button>
+    <form id="fetchForm" method="POST">
+        <input type="text" name="passage" placeholder="John 8:12-20" required value="{{ passage }}">
+        <input type="text" name="versions" placeholder="KOERV, NIV, NASB" required value="{{ versions_str }}">
+        <button type="submit" id="submitBtn">Fetch Passage</button>
     </form>
 
+    <div id="spinner">
+        <div class="loader"></div> <span>Searching BibleGateway...</span>
+    </div>
+
     {% if results %}
-        {% for v, text in results.items() %}
-            <div class="result">
-                <h3>{{ v }}</h3>
-                <p>{{ text }}</p>
-            </div>
-        {% endfor %}
+        <div id="results-container">
+            {% for v, text in results.items() %}
+                <div class="result">
+                    <h3>{{ v }}</h3>
+                    <p>{{ text }}</p>
+                </div>
+            {% endfor %}
+        </div>
     {% endif %}
+
+    <script>
+        // Show spinner and hide old results when clicking submit
+        document.getElementById('fetchForm').onsubmit = function() {
+            document.getElementById('spinner').style.display = 'block';
+            document.getElementById('submitBtn').disabled = true;
+            document.getElementById('submitBtn').innerText = 'Fetching...';
+            var results = document.getElementById('results-container');
+            if (results) results.style.opacity = '0.3';
+        };
+    </script>
 </body>
 </html>
 """
-
 @app.route('/', methods=['GET', 'POST'])
 def home():
     results = {}
