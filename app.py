@@ -20,6 +20,12 @@ def get_bible_passage(passage, version, include_verses=True):
 
         soup = BeautifulSoup(response.text, 'html.parser')
 
+        # --- FIX: Aggressively remove footer sections BEFORE processing ---
+        # This prevents the script from accidentally scraping the text inside
+        # the "Footnotes" or "Cross References" sections at the bottom of the page.
+        for footer in soup.find_all('div', class_=['footnotes', 'crossrefs', 'publisher-info-bottom']):
+            footer.decompose()
+
         container = soup.find("div", class_="passage-content") or soup.find("div", class_="passage-text")
 
         if not container:
@@ -33,10 +39,6 @@ def get_bible_passage(passage, version, include_verses=True):
             # --- CASE A: Header (Bold Title) ---
             if element.name in ['h3', 'h4']:
                 heading_text = element.get_text().strip()
-                # Ignore meta-headers like "Cross references"
-                if heading_text.lower() in ['cross references', 'footnotes', 'bibliography']:
-                    continue
-
                 if heading_text:
                     passage_pieces.append(f"\n\n<strong>{heading_text}</strong>\n")
                 continue
@@ -49,12 +51,11 @@ def get_bible_passage(passage, version, include_verses=True):
             is_verse_text = any('text' in c for c in class_list)
 
             if is_verse_text:
-                # 1. Remove Junk (Footnotes, Cross-refs)
+                # 1. Remove Junk (Footnotes, Cross-refs inline)
                 for junk in element.find_all(['sup', 'div'], class_=['footnote', 'crossreference', 'bibleref', 'footnotes']):
                     junk.decompose()
 
                 # 2. Handle Verse Numbers
-                # Find all potential number tags
                 number_tags = element.find_all(['span', 'strong', 'b', 'sup'], class_=['versenum', 'chapternum', 'v-num'])
 
                 if not include_verses:
@@ -64,23 +65,19 @@ def get_bible_passage(passage, version, include_verses=True):
                     for num in number_tags:
                         # Style the number gray and mark it to be kept
                         num.name = 'span'
-                        # Inline styles ensure the color survives the copy to Google Docs
                         num['style'] = "color: #999; font-size: 0.75em; font-weight: bold; margin-right: 3px;"
                         num['data-keep'] = "true"
-                        # Clear other classes to avoid CSS conflicts
                         del num['class']
 
-                # 3. Flatten the HTML (Unwrap everything except our styled numbers)
-                # We iterate over all tags. If it's not marked 'data-keep', we strip the tag but keep text.
+                # 3. Flatten the HTML (Unwrap tags)
                 for tag in element.find_all(True):
                     if tag.has_attr('data-keep'):
                         continue
                     tag.unwrap()
 
-                # 4. Get the cleaned HTML (preserves our gray spans)
+                # 4. Get the cleaned HTML
                 text = element.decode_contents().strip()
 
-                # Safety net: Remove leading plain-text numbers if scraping missed a tag
                 if not include_verses:
                     text = re.sub(r'^\d+\s*', '', text)
 
