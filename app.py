@@ -30,20 +30,18 @@ def get_bible_passage(passage, version, include_verses=True):
 
         for element in container.find_all(tags_to_find):
 
-            # --- CASE A: It's a Header ---
+            # --- CASE A: Header (Bold Title) ---
             if element.name in ['h3', 'h4']:
                 heading_text = element.get_text().strip()
-
-                # FIX 1: Ignore "Cross references" and "Footnotes" sections
+                # Ignore meta-headers like "Cross references"
                 if heading_text.lower() in ['cross references', 'footnotes', 'bibliography']:
                     continue
 
                 if heading_text:
-                    # FIX 2: Reduced newlines to just one before the header to tighten spacing
                     passage_pieces.append(f"\n\n<strong>{heading_text}</strong>\n")
                 continue
 
-            # --- CASE B: It's a Verse Span ---
+            # --- CASE B: Verse Text ---
             if element.find_parent(['h3', 'h4']):
                 continue
 
@@ -51,16 +49,38 @@ def get_bible_passage(passage, version, include_verses=True):
             is_verse_text = any('text' in c for c in class_list)
 
             if is_verse_text:
-                # Clean junk
+                # 1. Remove Junk (Footnotes, Cross-refs)
                 for junk in element.find_all(['sup', 'div'], class_=['footnote', 'crossreference', 'bibleref', 'footnotes']):
                     junk.decompose()
 
+                # 2. Handle Verse Numbers
+                # Find all potential number tags
+                number_tags = element.find_all(['span', 'strong', 'b', 'sup'], class_=['versenum', 'chapternum', 'v-num'])
+
                 if not include_verses:
-                    for num in element.find_all(['span', 'strong', 'b'], class_=['versenum', 'chapternum', 'v-num']):
+                    for num in number_tags:
                         num.decompose()
+                else:
+                    for num in number_tags:
+                        # Style the number gray and mark it to be kept
+                        num.name = 'span'
+                        # Inline styles ensure the color survives the copy to Google Docs
+                        num['style'] = "color: #999; font-size: 0.75em; font-weight: bold; margin-right: 3px;"
+                        num['data-keep'] = "true"
+                        # Clear other classes to avoid CSS conflicts
+                        del num['class']
 
-                text = element.get_text().strip()
+                # 3. Flatten the HTML (Unwrap everything except our styled numbers)
+                # We iterate over all tags. If it's not marked 'data-keep', we strip the tag but keep text.
+                for tag in element.find_all(True):
+                    if tag.has_attr('data-keep'):
+                        continue
+                    tag.unwrap()
 
+                # 4. Get the cleaned HTML (preserves our gray spans)
+                text = element.decode_contents().strip()
+
+                # Safety net: Remove leading plain-text numbers if scraping missed a tag
                 if not include_verses:
                     text = re.sub(r'^\d+\s*', '', text)
 
@@ -69,11 +89,11 @@ def get_bible_passage(passage, version, include_verses=True):
 
         full_text = " ".join(passage_pieces)
 
-        # Cleanup: Ensure clean newlines without trailing spaces
+        # Cleanup Whitespace
         full_text = re.sub(r' \n', '\n', full_text)
         full_text = re.sub(r'\n ', '\n', full_text)
-        full_text = re.sub(r'\n{3,}', '\n\n', full_text) # Max 2 newlines (paragraph break)
-        full_text = re.sub(r'[ ]{2,}', ' ', full_text)   # No double spaces
+        full_text = re.sub(r'\n{3,}', '\n\n', full_text)
+        full_text = re.sub(r'[ ]{2,}', ' ', full_text)
 
         return full_text.strip()
 
@@ -81,7 +101,6 @@ def get_bible_passage(passage, version, include_verses=True):
         return f"An error occurred with version {version}: {e}"
 
 # --- HTML Template ---
-# FIX 3: Removed indentation inside the 'copy-target' div to prevent whitespace issues
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -97,7 +116,6 @@ HTML_TEMPLATE = """
 
         .result { background: #f8f9fa; padding: 25px; border-radius: 8px; margin-top: 20px; border-left: 5px solid #007bff; position: relative; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
 
-        /* Styles for the copied content */
         h3.version-title { margin-top: 0; margin-bottom: 10px; color: #007bff; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
         .passage-content { white-space: pre-wrap; word-wrap: break-word; font-family: sans-serif; }
 
@@ -150,7 +168,7 @@ HTML_TEMPLATE = """
         async function copyRichText(elementId, btn) {
             const element = document.getElementById(elementId);
 
-            // We strip leading/trailing whitespace from the inner text to avoid top-gap
+            // Clean text + inline styles for Google Docs
             const cleanHTML = '<div style="white-space: pre-wrap; font-family: sans-serif;">' + element.innerHTML.trim() + '</div>';
             const cleanText = element.innerText.trim();
 
