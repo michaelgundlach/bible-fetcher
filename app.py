@@ -21,35 +21,62 @@ def get_bible_passage(passage, version, include_verses=True):
 
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Target all spans with class starting with 'text'
-        verses = soup.find_all("span", class_=re.compile(r"text\s+.*"))
+        container = soup.find("div", class_="passage-content") or soup.find("div", class_="passage-text")
 
-        if not verses:
+        if not container:
             return f"Error: Could not find text for version '{version}'."
 
         passage_pieces = []
-        for v in verses:
-            # Always clean out footnotes and cross-references
-            for junk in v.find_all(['sup', 'div'], class_=['footnote', 'crossreference']):
-                junk.decompose()
 
-            # If checkbox is UNCHECKED, remove verse and chapter numbers
-            if not include_verses:
-                # Target common BibleGateway number classes
-                for num in v.find_all(['span', 'strong', 'b'], class_=['versenum', 'chapternum', 'v-num']):
-                    num.decompose()
+        # Find both headers and verse spans
+        tags_to_find = re.compile(r'^h[34]$|^span$')
 
-            text = v.get_text().strip()
+        for element in container.find_all(tags_to_find):
 
-            # Final regex safety net to catch numbers not wrapped in spans
-            if not include_verses:
-                text = re.sub(r'^\d+\s*', '', text)
+            # --- CASE A: It's a Header ---
+            if element.name in ['h3', 'h4']:
+                heading_text = element.get_text().strip()
+                if heading_text:
+                    # FIX: Use HTML tags for bolding, not markdown
+                    passage_pieces.append(f"\n\n<strong>{heading_text}</strong>\n")
+                continue
 
-            if text:
-                passage_pieces.append(text)
+            # --- CASE B: It's a Verse Span ---
+            # FIX: Check if this span is inside a header we already processed
+            if element.find_parent(['h3', 'h4']):
+                continue
+
+            class_list = element.get('class', [])
+            is_verse_text = any('text' in c for c in class_list)
+
+            if is_verse_text:
+                # Clean junk
+                for junk in element.find_all(['sup', 'div'], class_=['footnote', 'crossreference', 'bibleref']):
+                    junk.decompose()
+
+                # Handle Verse Numbers
+                if not include_verses:
+                    for num in element.find_all(['span', 'strong', 'b'], class_=['versenum', 'chapternum', 'v-num']):
+                        num.decompose()
+
+                text = element.get_text().strip()
+
+                # Final cleanup for numbers
+                if not include_verses:
+                    text = re.sub(r'^\d+\s*', '', text)
+
+                if text:
+                    passage_pieces.append(text)
 
         full_text = " ".join(passage_pieces)
-        return re.sub(r'\s+', ' ', full_text).strip()
+
+        # Cleanup spacing
+        full_text = re.sub(r' \n', '\n', full_text)
+        full_text = re.sub(r'\n ', '\n', full_text)
+        full_text = re.sub(r'\n{3,}', '\n\n', full_text)
+        full_text = re.sub(r'[ ]{2,}', ' ', full_text)
+
+        return full_text.strip()
 
     except Exception as e:
         return f"An error occurred with version {version}: {e}"
@@ -69,7 +96,10 @@ HTML_TEMPLATE = """
         button:disabled { background-color: #ccc; cursor: not-allowed; }
 
         .result { background: #f8f9fa; padding: 25px; border-radius: 8px; margin-top: 20px; border-left: 5px solid #007bff; position: relative; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        h3 { margin-top: 0; color: #007bff; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
+        h3.version-title { margin-top: 0; color: #007bff; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
+
+        /* white-space: pre-wrap is still needed for the newlines */
+        .passage-content { white-space: pre-wrap; word-wrap: break-word; }
 
         .copy-btn { position: absolute; top: 15px; right: 15px; background: #6c757d; color: white; border: none; font-size: 12px; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
         .copy-btn:hover { background: #5a6268; }
@@ -100,9 +130,9 @@ HTML_TEMPLATE = """
         <div id="results-container">
             {% for v, text in results.items() %}
                 <div class="result">
-                    <h3>{{ v }}</h3>
+                    <h3 class="version-title">{{ v }}</h3>
                     <button class="copy-btn" onclick="copyText('text-{{ loop.index }}', this)">Copy</button>
-                    <p id="text-{{ loop.index }}">{{ text }}</p>
+                    <div id="text-{{ loop.index }}" class="passage-content">{{ text | safe }}</div>
                 </div>
             {% endfor %}
         </div>
@@ -118,6 +148,8 @@ HTML_TEMPLATE = """
         };
 
         function copyText(elementId, btn) {
+            // Note: innerText preserves newlines but ignores hidden HTML tags
+            // Since we want the formatting to paste nicely, we grab the rendered text
             var text = document.getElementById(elementId).innerText;
             navigator.clipboard.writeText(text).then(function() {
                 var originalText = btn.innerText;
@@ -146,7 +178,6 @@ def home():
         versions_str = request.form.get('versions')
         include_verses = True if request.form.get('include_verses') else False
 
-        # Split by comma OR space (handles "NIV,KOERV", "NIV KOERV", or "NIV, KOERV")
         version_list = [v.upper() for v in re.split(r'[,\s]+', versions_str) if v]
 
         for v in version_list:
@@ -155,5 +186,4 @@ def home():
     return render_template_string(HTML_TEMPLATE, results=results, passage=passage, versions_str=versions_str, include_verses=include_verses)
 
 if __name__ == '__main__':
-    # Removed debug=True for production
     app.run(host='0.0.0.0', port=5001)
