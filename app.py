@@ -28,7 +28,7 @@ def get_bible_passage(passage, version, include_verses=True):
 
         passage_pieces = []
 
-        # Find both headers and verse spans
+        # Find both headers and verse spans in order
         tags_to_find = re.compile(r'^h[34]$|^span$')
 
         for element in container.find_all(tags_to_find):
@@ -37,12 +37,12 @@ def get_bible_passage(passage, version, include_verses=True):
             if element.name in ['h3', 'h4']:
                 heading_text = element.get_text().strip()
                 if heading_text:
-                    # FIX: Use HTML tags for bolding, not markdown
+                    # Use HTML <strong> tags for bolding
                     passage_pieces.append(f"\n\n<strong>{heading_text}</strong>\n")
                 continue
 
             # --- CASE B: It's a Verse Span ---
-            # FIX: Check if this span is inside a header we already processed
+            # Check if this span is inside a header we already processed to avoid duplication
             if element.find_parent(['h3', 'h4']):
                 continue
 
@@ -50,7 +50,7 @@ def get_bible_passage(passage, version, include_verses=True):
             is_verse_text = any('text' in c for c in class_list)
 
             if is_verse_text:
-                # Clean junk
+                # Clean junk (footnotes, cross-refs)
                 for junk in element.find_all(['sup', 'div'], class_=['footnote', 'crossreference', 'bibleref']):
                     junk.decompose()
 
@@ -61,7 +61,7 @@ def get_bible_passage(passage, version, include_verses=True):
 
                 text = element.get_text().strip()
 
-                # Final cleanup for numbers
+                # Final cleanup for numbers at start of text
                 if not include_verses:
                     text = re.sub(r'^\d+\s*', '', text)
 
@@ -70,7 +70,7 @@ def get_bible_passage(passage, version, include_verses=True):
 
         full_text = " ".join(passage_pieces)
 
-        # Cleanup spacing
+        # Cleanup spacing around newlines
         full_text = re.sub(r' \n', '\n', full_text)
         full_text = re.sub(r'\n ', '\n', full_text)
         full_text = re.sub(r'\n{3,}', '\n\n', full_text)
@@ -98,7 +98,7 @@ HTML_TEMPLATE = """
         .result { background: #f8f9fa; padding: 25px; border-radius: 8px; margin-top: 20px; border-left: 5px solid #007bff; position: relative; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
         h3.version-title { margin-top: 0; color: #007bff; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
 
-        /* white-space: pre-wrap is still needed for the newlines */
+        /* white-space: pre-wrap is needed for newlines */
         .passage-content { white-space: pre-wrap; word-wrap: break-word; }
 
         .copy-btn { position: absolute; top: 15px; right: 15px; background: #6c757d; color: white; border: none; font-size: 12px; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
@@ -130,7 +130,7 @@ HTML_TEMPLATE = """
         <div id="results-container">
             {% for v, text in results.items() %}
                 <div class="result">
-                    <h3 class="version-title">{{ v }}</h3>
+                    <h3 class="version-title">{{ v }} - {{ passage }}</h3>
                     <button class="copy-btn" onclick="copyText('text-{{ loop.index }}', this)">Copy</button>
                     <div id="text-{{ loop.index }}" class="passage-content">{{ text | safe }}</div>
                 </div>
@@ -148,8 +148,6 @@ HTML_TEMPLATE = """
         };
 
         function copyText(elementId, btn) {
-            // Note: innerText preserves newlines but ignores hidden HTML tags
-            // Since we want the formatting to paste nicely, we grab the rendered text
             var text = document.getElementById(elementId).innerText;
             navigator.clipboard.writeText(text).then(function() {
                 var originalText = btn.innerText;
