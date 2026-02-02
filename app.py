@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 from flask import Flask, render_template_string, request
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 import re
+import traceback
 
 app = Flask(__name__)
 
 # --- REGEX PATTERNS ---
-# (?s) = DOTALL (matches newlines)
 QUOTE_FINDER = re.compile(r'(?s)([“"「«])(.*?)(?:[”"」»]|$)')
-# Helper to strip everything except alphanumeric chars for fuzzy matching
 NORMALIZER = re.compile(r'[\W_]+')
 
 def normalize(text):
@@ -17,28 +16,14 @@ def normalize(text):
 
 def get_quote_blocks(text):
     """
-    Parses verse text. Returns list of dicts:
-    {'text': str, 'start': int, 'end': int, 'is_implicit': bool}
+    Parses verse text into Quote Blocks.
     """
     blocks = []
-    # Tokenize by finding quote patterns
-    # We first check if the string STARTS with a closing quote situation (Implicit Open)
-    # Actually, the logic is simpler:
-    # 1. Find all explicit quotes.
-    # 2. If the first quote found is a CLOSER, or if we have text BEFORE the first OPENER that ends with a closer...
-    # The regex r'(?s)([“"「«])(.*?)(?:[”"」»]|$)' finds Open->Close pairs.
-    # It does NOT find "Start->Close" (Implicit Open).
-
-    # We need a tokenizing approach to handle Implicit Open safely.
-    # Let's use the split strategy from before which was robust.
-
-    # Split by delimiters, keeping delimiters
     tokens = re.split(r'([“"「«”"」»])', text)
 
     current_text = ""
     in_quote = False
 
-    # Determine initial state: If first quote char is a Closer, we started inside.
     for t in tokens:
         if t in ['”', '」', '»']: # Closers
             in_quote = True
@@ -47,17 +32,12 @@ def get_quote_blocks(text):
             in_quote = False
             break
 
-    # Reconstruct blocks
-    current_block_start = 0
-
     for token in tokens:
         if not token: continue
 
         if re.match(r'[“"「«”"」»]', token):
-            # It's a delimiter
             if token in ['“', '「', '«']: # OPENER
                 if not in_quote:
-                    # Flush Outside
                     if current_text:
                         blocks.append({'text': current_text, 'is_quote': False, 'is_implicit': False})
                         current_text = ""
@@ -67,12 +47,10 @@ def get_quote_blocks(text):
             elif token in ['”', '」', '»']: # CLOSER
                 current_text += token
                 if in_quote:
-                    # Flush Inside
                     blocks.append({'text': current_text, 'is_quote': True, 'is_implicit': False})
                     current_text = ""
                     in_quote = False
             else:
-                # Straight quote " toggle
                 if not in_quote:
                     if current_text:
                         blocks.append({'text': current_text, 'is_quote': False, 'is_implicit': False})
@@ -88,13 +66,7 @@ def get_quote_blocks(text):
             current_text += token
 
     if current_text:
-        # If we end while in_quote, it's an Implicit Close (handled as quote)
-        # If we end while out_quote, it's narrative
         blocks.append({'text': current_text, 'is_quote': in_quote, 'is_implicit': in_quote})
-
-    # Post-process: If NO quotes were found at all (length 1, not quote), check if it should be Implicit Whole Verse
-    # This happens in the Analyzer using the 'is_implicit' flag.
-    # Actually, if in_quote was never triggered, we get 1 block is_quote=False.
 
     return blocks
 
@@ -116,7 +88,12 @@ def analyze_ceb_for_red_letters(passage, debug_log):
         verse_content_map = {}
 
         for verse_span in container.find_all('span', class_='text'):
-            v_num_tag = verse_span.find(class_=['versenum', 'chapternum', 'v-num'])
+            if not isinstance(verse_span, Tag) or verse_span.attrs is None: continue
+
+            c_tag = verse_span.find(class_=['chapternum'])
+            if c_tag: c_tag.decompose()
+
+            v_num_tag = verse_span.find(class_=['versenum', 'v-num'])
             if v_num_tag:
                 current_verse = v_num_tag.get_text().strip()
                 v_num_tag.decompose()
@@ -138,26 +115,17 @@ def analyze_ceb_for_red_letters(passage, debug_log):
             full_text = data['full_text'].strip()
             all_woj_text = "".join(data['woj_spans'])
 
-            # Fuzzy Matching Prep
             norm_woj = normalize(all_woj_text)
             norm_full = normalize(full_text)
 
             blocks = get_quote_blocks(full_text)
-            # We only care about Quote Blocks for the mask
-            # But wait, we need to map the output structure.
-            # get_bible_passage will get ALL blocks and filter for quotes.
-            # So here we must generate a mask specifically for the Quote Blocks.
-
             quote_blocks = [b for b in blocks if b['is_quote']]
 
-            # Special: Implicit Whole Verse Check
-            # If no quotes found, but the verse is > 90% red, treat as 1 implicit block
             is_implicit_red_verse = False
             if not quote_blocks and len(norm_full) > 0:
                 ratio = len(norm_woj) / len(norm_full)
                 if ratio > 0.9:
                     is_implicit_red_verse = True
-                    # Create a fake block for the mask logic
                     quote_blocks = [{'text': full_text, 'is_quote': False, 'is_implicit': True}]
 
             mask_data = []
@@ -165,11 +133,9 @@ def analyze_ceb_for_red_letters(passage, debug_log):
 
             for block in quote_blocks:
                 is_red = False
-
                 if is_implicit_red_verse:
                     is_red = True
                 else:
-                    # Fuzzy Check: Is this block inside the Red Text?
                     norm_block = normalize(block['text'])
                     if norm_block and norm_block in norm_woj:
                         is_red = True
@@ -178,16 +144,11 @@ def analyze_ceb_for_red_letters(passage, debug_log):
                     'is_red': is_red,
                     'is_implicit': block.get('is_implicit', False)
                 })
-
-                # Debugging
-                d_txt = block['text'][:15].replace("\n","")
+                d_txt = block['text'][:10].replace("\n","")
                 debug_info.append(f"'{d_txt}':{is_red}")
 
             red_mask_map[v_num] = mask_data
-
             debug_log.append(f"[CEB {v_num}] Mask: {debug_info}")
-            if not quote_blocks and not is_implicit_red_verse:
-                 debug_log.append(f"   (No quotes, Not mostly red. WOJ Len: {len(norm_woj)} Full Len: {len(norm_full)})")
 
     except Exception as e:
         debug_log.append(f"[CEB Error] {e}")
@@ -222,9 +183,12 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
         tags_to_find = re.compile(r'^h[34]$|^span$')
         current_verse_num = None
         verse_buffer = {}
+        pending_chapter_html = ""
 
         # Pass 1: Aggregate
         for element in container.find_all(tags_to_find):
+            if not isinstance(element, Tag) or element.attrs is None: continue
+
             if element.name in ['h3', 'h4']:
                 passage_pieces.append({'type': 'header', 'content': "\n\n"})
                 continue
@@ -235,7 +199,19 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
                 for junk in element.find_all(['sup', 'div'], class_=['footnote', 'crossreference', 'bibleref', 'footnotes']):
                     junk.decompose()
 
-                v_tag = element.find(['span', 'strong', 'b', 'sup'], class_=['versenum', 'chapternum', 'v-num'])
+                v_tag_html = ""
+
+                # Check for Chapter Num
+                c_tag = element.find(['span', 'strong', 'b', 'sup'], class_=['chapternum'])
+                if c_tag:
+                    c_num = c_tag.get_text().strip()
+                    if include_verses:
+                        c_html = f'<span style="color: #999; font-size: 1.5em; font-weight: bold; margin-right: 5px;">{c_num}</span>'
+                        pending_chapter_html += c_html
+                    c_tag.decompose()
+
+                # Check for Verse Num
+                v_tag = element.find(['span', 'strong', 'b', 'sup'], class_=['versenum', 'v-num'])
 
                 has_native_red = False
                 for woj in element.find_all(class_='woj'):
@@ -247,18 +223,21 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
                 if v_tag:
                     current_verse_num = v_tag.get_text().strip()
                     if include_verses:
-                        classes = v_tag.get('class', [])
                         style = "color: #999; font-size: 0.75em; font-weight: bold; margin-right: 3px;"
-                        if 'chapternum' in classes:
-                            style = "color: #999; font-size: 1.5em; font-weight: bold; margin-right: 5px;"
-                        v_tag_html = f'<span style="{style}">{current_verse_num}</span>'
+                        v_num_html = f'<span style="{style}">{current_verse_num}</span>'
+                        v_tag_html = pending_chapter_html + v_num_html
+                        pending_chapter_html = ""
                     else:
                         v_tag_html = ""
+                        pending_chapter_html = ""
                     v_tag.decompose()
                 elif current_verse_num is None:
-                    continue
+                    # Still None. If we have text content later, we'll check pending_chapter_html there.
+                    pass
                 else:
-                    v_tag_html = ""
+                    if pending_chapter_html:
+                        v_tag_html = pending_chapter_html
+                        pending_chapter_html = ""
 
                 for tag in element.find_all(True):
                     if not tag.has_attr('data-keep'): tag.unwrap()
@@ -266,18 +245,33 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
                 text_content = element.decode_contents().strip()
 
                 if text_content:
+                    # --- FIX: Implicit Verse 1 Logic ---
+                    if current_verse_num is None and pending_chapter_html:
+                        # We have text, no verse num yet, but we just saw Chapter Num.
+                        # Assume this is Verse 1.
+                        current_verse_num = "1"
+                        # Flush the pending chapter HTML as the tag for this verse
+                        v_tag_html = pending_chapter_html
+                        pending_chapter_html = ""
+
                     if current_verse_num not in verse_buffer:
                         verse_buffer[current_verse_num] = {
                             'html_content': "",
                             'has_native': False,
                             'v_tag_html': v_tag_html
                         }
-                        if v_tag_html: verse_buffer[current_verse_num]['v_tag_html'] = v_tag_html
+                        if v_tag_html:
+                            verse_buffer[current_verse_num]['v_tag_html'] = v_tag_html
 
                     verse_buffer[current_verse_num]['html_content'] += text_content
                     if has_native_red: verse_buffer[current_verse_num]['has_native'] = True
 
-                    if not passage_pieces or passage_pieces[-1].get('id') != current_verse_num:
+                    last_item_id = None
+                    if passage_pieces:
+                        if isinstance(passage_pieces[-1], dict):
+                            last_item_id = passage_pieces[-1].get('id')
+
+                    if not passage_pieces or last_item_id != current_verse_num:
                         passage_pieces.append({'type': 'verse', 'id': current_verse_num})
 
         # Pass 2: Process
@@ -285,14 +279,20 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
         processed_ids = set()
 
         for item in passage_pieces:
+            if not isinstance(item, dict): continue
+
             if item['type'] == 'header':
                 final_output.append(item['content'])
                 continue
 
             v_num = item['id']
+            # Safety check: skip if still None (intro text without chapter header)
+            if v_num is None: continue
+
             if v_num in processed_ids: continue
             processed_ids.add(v_num)
 
+            if v_num not in verse_buffer: continue
             data = verse_buffer[v_num]
             text_html = data['html_content']
 
@@ -311,122 +311,64 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
                             s_num = str(i)
                             if s_num in red_letter_map:
                                 combined_mask.extend(red_letter_map[s_num])
-                        if combined_mask:
-                            mask = combined_mask
-                            if debug_log is not None:
-                                debug_log.append(f"[{version} {v_num}] Range Combined Mask: {[m['is_red'] for m in mask]}")
-                    except ValueError:
-                        pass
+                        if combined_mask: mask = combined_mask
+                    except ValueError: pass
 
                 if mask:
                     clean_text = BeautifulSoup(text_html, 'html.parser').get_text()
                     all_blocks = get_quote_blocks(clean_text)
                     quote_blocks = [b for b in all_blocks if b['is_quote']]
 
-                    # Fallback for implicit whole verse
                     if not quote_blocks and len(all_blocks) == 1:
-                         # If target has no quotes, but mask is simple, try implicit mapping
                          if len(mask) == 1 and mask[0]['is_implicit']:
-                             quote_blocks = all_blocks # Treat the whole thing as a block
+                             quote_blocks = all_blocks
 
                     if debug_log is not None:
                         t_dbg = [f"'{b['text'][:10]}...'" for b in quote_blocks]
                         debug_log.append(f"[{version} {v_num}] Quotes: {len(quote_blocks)} vs Mask: {len(mask)}")
-                        debug_log.append(f"   -> Quotes Found: {t_dbg}")
+                        debug_log.append(f"   -> Found: {t_dbg}")
 
-                    # Strict Matching
                     valid_mapping = True
-                    fail_reason = ""
-
                     if len(quote_blocks) != len(mask):
                         valid_mapping = False
-                        fail_reason = f"Count mismatch ({len(quote_blocks)} vs {len(mask)})"
                     else:
                         for i in range(len(quote_blocks)):
                             if not mask[i]['is_implicit'] and quote_blocks[i]['is_implicit']:
                                 valid_mapping = False
-                                fail_reason = "Explicit Mask vs Implicit Target"
                                 break
 
-                    if debug_log is not None and not valid_mapping:
-                         debug_log.append(f"   -> SKIPPED ({fail_reason})")
-
                     if valid_mapping:
-                        # Re-run tokenizer on HTML string to find replacement spots
-                        # This works because our tokenizer splits by delimiters which are unique chars
-                        # Warning: Tags inside quotes? We assume simple structure.
-
-                        # Strategy: Split HTML by delimiters.
-                        # This preserves tags inside text blocks.
                         tokens = re.split(r'([“"「«”"」»])', text_html)
-
-                        # Logic: Iterate tokens. Identify which are "Inside Quotes".
-                        # Map those "Inside Quote" tokens to our `quote_blocks` list.
-                        # Apply coloring if the corresponding block is Red.
-
                         new_html_parts = []
                         quote_idx = 0
-
-                        # Determine initial state (same as tokenizer)
                         in_quote = False
+
                         for t in tokens:
                             if t in ['”', '」', '»']: in_quote = True; break
                             if t in ['“', '「', '«']: in_quote = False; break
 
-                        # We need to map tokens to the logical blocks we validated
-                        # This is tricky because `quote_blocks` was derived from `clean_text`.
-                        # But the sequence of Open/Close events is identical in `clean_text` and `text_html`.
-
-                        # If we just walk the tokens and count "Quote Events", we should stay in sync.
-
                         for token in tokens:
                             is_delimiter = re.match(r'[“"「«”"」»]', token)
-
                             if is_delimiter:
-                                # Logic to determine if we are entering or exiting a quote
-                                # AND identifying exactly which quote_block index we are in.
-
-                                # This is getting complex to reconstruct perfectly.
-                                # Simplified: Just append the delimiter.
                                 new_html_parts.append(token)
-
-                                # Update state
-                                if token in ['“', '「', '«']: # Opener
+                                if token in ['“', '「', '«']:
                                     if not in_quote: in_quote = True
-                                elif token in ['”', '」', '»']: # Closer
-                                    if in_quote:
-                                        in_quote = False
-                                        # End of a quote block. Increment index.
-                                        quote_idx += 1
-                                else: # Straight "
-                                    if in_quote:
-                                        in_quote = False; quote_idx += 1
-                                    else:
-                                        in_quote = True
+                                elif token in ['”', '」', '»']:
+                                    if in_quote: in_quote = False; quote_idx += 1
+                                else:
+                                    if in_quote: in_quote = False; quote_idx += 1
+                                    else: in_quote = True
                             else:
-                                # Text content
                                 if in_quote:
-                                    # We are inside a quote. Check if this quote_idx is Red.
                                     if quote_idx < len(mask) and mask[quote_idx]['is_red']:
                                         new_html_parts.append(f'<span class="woj-text" style="color: #cc0000;">{token}</span>')
                                     else:
                                         new_html_parts.append(token)
                                 else:
-                                    # Narrative
-                                    # Implicit Open handling:
-                                    # If we started `in_quote` (Implicit Open) and haven't hit the first Closer yet...
-                                    # The tokenizer puts the first text chunk in `tokens[0]`.
-                                    # If `tokens` loop started with `in_quote=True`, this text is part of quote_idx 0.
-
-                                    # Wait, my loop above initializes `in_quote`.
-                                    # If initialized True, the first text token is indeed inside.
-
                                     if quote_idx < len(mask) and mask[quote_idx]['is_red'] and mask[quote_idx]['is_implicit']:
-                                         # Implicit whole verse fallback
                                          new_html_parts.append(f'<span class="woj-text" style="color: #cc0000;">{token}</span>')
                                     else:
                                          new_html_parts.append(token)
-
                         text_html = "".join(new_html_parts)
 
             final_output.append(data['v_tag_html'] + text_html)
@@ -442,7 +384,7 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
 
     except Exception as e:
         result_data["text"] = f"An error occurred with version {version}: {e}"
-        if debug_log: debug_log.append(f"Error: {e}")
+        if debug_log: debug_log.append(f"Error: {e} \n {traceback.format_exc()}")
         return result_data
 
 HTML_TEMPLATE = """
