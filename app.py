@@ -47,13 +47,9 @@ def get_bible_passage(passage, version, include_verses=True):
 
             # --- CASE A: Header ---
             if element.name in ['h3', 'h4']:
-                heading_text = element.get_text().strip()
-                if heading_text.lower() in ['cross references', 'footnotes', 'bibliography']:
-                    continue
-
-                if heading_text:
-                    # Note: We reduced the newlines here to keep it tight
-                    passage_pieces.append(f"\n<strong>{heading_text}</strong>\n")
+                # UPDATE: We skip the TEXT of the header, but we keep the whitespace.
+                # This breaks the "wall of text" into logical paragraphs.
+                passage_pieces.append("\n\n")
                 continue
 
             # --- CASE B: Verse Text ---
@@ -97,7 +93,8 @@ def get_bible_passage(passage, version, include_verses=True):
         # Aggressive whitespace cleanup
         full_text = re.sub(r' \n', '\n', full_text)
         full_text = re.sub(r'\n ', '\n', full_text)
-        full_text = re.sub(r'\n{3,}', '\n\n', full_text) # Max 1 blank line
+        # Ensure exactly 2 newlines for a paragraph break, but no more (prevents huge gaps)
+        full_text = re.sub(r'\n{3,}', '\n\n', full_text)
         full_text = re.sub(r'[ ]{2,}', ' ', full_text)
 
         result_data["text"] = full_text.strip()
@@ -108,7 +105,6 @@ def get_bible_passage(passage, version, include_verses=True):
         return result_data
 
 # --- HTML Template ---
-# FIX: The content inside 'copy-target' is smashed onto one line to prevent "pre-wrap" from rendering code indentation
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -176,8 +172,6 @@ HTML_TEMPLATE = """
         async function copyRichText(elementId, btn) {
             const element = document.getElementById(elementId);
 
-            // We use .innerHTML directly but trim it.
-            // The template minification above ensures no internal gaps exist.
             const cleanHTML = '<div style="white-space: pre-wrap; font-family: sans-serif;">' + element.innerHTML.trim() + '</div>';
             const cleanText = element.innerText.trim();
 
@@ -225,13 +219,11 @@ def home():
         version_list = [v.upper() for v in re.split(r'[,\s]+', versions_str) if v]
         passage_list = [p.strip() for p in passage.split(',') if p.strip()]
 
-        # Outer loop: Versions
         for v in version_list:
             version_block = {
                 'name': v,
                 'passages': []
             }
-            # Inner loop: Passages
             for p in passage_list:
                 data = get_bible_passage(p, v, include_verses)
                 version_block['passages'].append(data)
