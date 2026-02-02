@@ -14,10 +14,9 @@ def get_bible_passage(passage, version, include_verses=True):
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
 
-    # Default fallback if scraping fails
     result_data = {
         "text": "",
-        "ref": passage  # Default to user input (e.g. "John 8:12")
+        "ref": passage.strip()
     }
 
     try:
@@ -26,15 +25,13 @@ def get_bible_passage(passage, version, include_verses=True):
 
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # --- FIX: Aggressively remove footer sections BEFORE processing ---
+        # Clean footer junk
         for footer in soup.find_all('div', class_=['footnotes', 'crossrefs', 'publisher-info-bottom']):
             footer.decompose()
 
-        # --- NEW: Scrape the localized reference name ---
-        # We look for the "dropdown-display-text" which contains the canonical name (e.g. "요한복음 8:12")
+        # Scrape localized reference name
         ref_div = soup.find("div", class_="dropdown-display-text")
         if ref_div:
-            # Update our reference to the one found on the page
             result_data["ref"] = ref_div.get_text().strip()
 
         container = soup.find("div", class_="passage-content") or soup.find("div", class_="passage-text")
@@ -48,14 +45,15 @@ def get_bible_passage(passage, version, include_verses=True):
 
         for element in container.find_all(tags_to_find):
 
-            # --- CASE A: Header (Bold Title) ---
+            # --- CASE A: Header ---
             if element.name in ['h3', 'h4']:
                 heading_text = element.get_text().strip()
                 if heading_text.lower() in ['cross references', 'footnotes', 'bibliography']:
                     continue
 
                 if heading_text:
-                    passage_pieces.append(f"\n\n<strong>{heading_text}</strong>\n")
+                    # Note: We reduced the newlines here to keep it tight
+                    passage_pieces.append(f"\n<strong>{heading_text}</strong>\n")
                 continue
 
             # --- CASE B: Verse Text ---
@@ -66,11 +64,9 @@ def get_bible_passage(passage, version, include_verses=True):
             is_verse_text = any('text' in c for c in class_list)
 
             if is_verse_text:
-                # 1. Remove Junk
                 for junk in element.find_all(['sup', 'div'], class_=['footnote', 'crossreference', 'bibleref', 'footnotes']):
                     junk.decompose()
 
-                # 2. Handle Verse Numbers
                 number_tags = element.find_all(['span', 'strong', 'b', 'sup'], class_=['versenum', 'chapternum', 'v-num'])
 
                 if not include_verses:
@@ -83,13 +79,11 @@ def get_bible_passage(passage, version, include_verses=True):
                         num['data-keep'] = "true"
                         del num['class']
 
-                # 3. Flatten the HTML
                 for tag in element.find_all(True):
                     if tag.has_attr('data-keep'):
                         continue
                     tag.unwrap()
 
-                # 4. Get the cleaned HTML
                 text = element.decode_contents().strip()
 
                 if not include_verses:
@@ -100,10 +94,10 @@ def get_bible_passage(passage, version, include_verses=True):
 
         full_text = " ".join(passage_pieces)
 
-        # Cleanup Whitespace
+        # Aggressive whitespace cleanup
         full_text = re.sub(r' \n', '\n', full_text)
         full_text = re.sub(r'\n ', '\n', full_text)
-        full_text = re.sub(r'\n{3,}', '\n\n', full_text)
+        full_text = re.sub(r'\n{3,}', '\n\n', full_text) # Max 1 blank line
         full_text = re.sub(r'[ ]{2,}', ' ', full_text)
 
         result_data["text"] = full_text.strip()
@@ -114,6 +108,7 @@ def get_bible_passage(passage, version, include_verses=True):
         return result_data
 
 # --- HTML Template ---
+# FIX: The content inside 'copy-target' is smashed onto one line to prevent "pre-wrap" from rendering code indentation
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -129,7 +124,7 @@ HTML_TEMPLATE = """
 
         .result { background: #f8f9fa; padding: 25px; border-radius: 8px; margin-top: 20px; border-left: 5px solid #007bff; position: relative; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
 
-        h3.version-title { margin-top: 0; margin-bottom: 10px; color: #007bff; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
+        h3.version-title { margin-top: 0; margin-bottom: 5px; color: #007bff; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
         .passage-content { white-space: pre-wrap; word-wrap: break-word; font-family: sans-serif; }
 
         .copy-btn { position: absolute; top: 15px; right: 15px; background: #6c757d; color: white; border: none; font-size: 12px; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
@@ -146,7 +141,7 @@ HTML_TEMPLATE = """
     <h2>📖 Bible Passage Fetcher</h2>
     <form id="fetchForm" method="POST">
         <div class="controls">
-            <input type="text" name="passage" placeholder="e.g. John 8:12-20" required value="{{ passage }}">
+            <input type="text" name="passage" placeholder="e.g. John 8:12, Mark 2" required value="{{ passage }}">
             <input type="text" name="versions" placeholder="e.g. KOERV NIV" required value="{{ versions_str }}">
             <label>
                 <input type="checkbox" name="include_verses" {% if include_verses %}checked{% endif %}> Verse Numbers
@@ -159,11 +154,11 @@ HTML_TEMPLATE = """
 
     {% if results %}
         <div id="results-container">
-            {% for v, data in results.items() %}
+            {% for v_block in results %}
                 <div class="result">
-                    <div id="copy-target-{{ loop.index }}"><h3 class="version-title">{{ v }} - {{ data.ref }}</h3><div class="passage-content">{{ data.text | safe }}</div></div>
+                    <div id="copy-target-{{ loop.index }}">{% for item in v_block.passages %}<h3 class="version-title">{{ v_block.name }} - {{ item.ref }}</h3><div class="passage-content">{{ item.text | safe }}</div>{% if not loop.last %}<br><br>{% endif %}{% endfor %}</div>
 
-                    <button class="copy-btn" onclick="copyRichText('copy-target-{{ loop.index }}', this)">Copy</button>
+                    <button class="copy-btn" onclick="copyRichText('copy-target-{{ loop.index }}', this)">Copy All {{ v_block.name }}</button>
                 </div>
             {% endfor %}
         </div>
@@ -181,7 +176,8 @@ HTML_TEMPLATE = """
         async function copyRichText(elementId, btn) {
             const element = document.getElementById(elementId);
 
-            // Clean text + inline styles for Google Docs
+            // We use .innerHTML directly but trim it.
+            // The template minification above ensures no internal gaps exist.
             const cleanHTML = '<div style="white-space: pre-wrap; font-family: sans-serif;">' + element.innerHTML.trim() + '</div>';
             const cleanText = element.innerText.trim();
 
@@ -216,7 +212,7 @@ HTML_TEMPLATE = """
 
 @app.route('/', methods=['GET', 'POST'])
 def home():
-    results = {}
+    results = []
     passage = ""
     versions_str = ""
     include_verses = True
@@ -227,10 +223,20 @@ def home():
         include_verses = True if request.form.get('include_verses') else False
 
         version_list = [v.upper() for v in re.split(r'[,\s]+', versions_str) if v]
+        passage_list = [p.strip() for p in passage.split(',') if p.strip()]
 
+        # Outer loop: Versions
         for v in version_list:
-            # results[v] is now a dictionary: {'text': ..., 'ref': ...}
-            results[v] = get_bible_passage(passage, v, include_verses)
+            version_block = {
+                'name': v,
+                'passages': []
+            }
+            # Inner loop: Passages
+            for p in passage_list:
+                data = get_bible_passage(p, v, include_verses)
+                version_block['passages'].append(data)
+
+            results.append(version_block)
 
     return render_template_string(HTML_TEMPLATE, results=results, passage=passage, versions_str=versions_str, include_verses=include_verses)
 
