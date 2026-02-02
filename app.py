@@ -47,8 +47,7 @@ def get_bible_passage(passage, version, include_verses=True):
 
             # --- CASE A: Header ---
             if element.name in ['h3', 'h4']:
-                # UPDATE: We skip the TEXT of the header, but we keep the whitespace.
-                # This breaks the "wall of text" into logical paragraphs.
+                # Skip text, but add whitespace for paragraph breaks
                 passage_pieces.append("\n\n")
                 continue
 
@@ -63,6 +62,7 @@ def get_bible_passage(passage, version, include_verses=True):
                 for junk in element.find_all(['sup', 'div'], class_=['footnote', 'crossreference', 'bibleref', 'footnotes']):
                     junk.decompose()
 
+                # Find all numbers (verses OR chapters)
                 number_tags = element.find_all(['span', 'strong', 'b', 'sup'], class_=['versenum', 'chapternum', 'v-num'])
 
                 if not include_verses:
@@ -70,9 +70,21 @@ def get_bible_passage(passage, version, include_verses=True):
                         num.decompose()
                 else:
                     for num in number_tags:
+                        # Check if it's a Chapter Number or Verse Number
+                        # We look at the class list to decide the styling
+                        classes = num.get('class', [])
+
                         num.name = 'span'
-                        num['style'] = "color: #999; font-size: 0.75em; font-weight: bold; margin-right: 3px;"
                         num['data-keep'] = "true"
+
+                        if 'chapternum' in classes:
+                            # LARGE font for Chapter numbers (e.g. "10")
+                            num['style'] = "color: #999; font-size: 1.5em; font-weight: bold; margin-right: 5px;"
+                        else:
+                            # Small font for Verse numbers
+                            num['style'] = "color: #999; font-size: 0.75em; font-weight: bold; margin-right: 3px;"
+
+                        # Remove original class to prevent CSS conflicts
                         del num['class']
 
                 for tag in element.find_all(True):
@@ -93,7 +105,6 @@ def get_bible_passage(passage, version, include_verses=True):
         # Aggressive whitespace cleanup
         full_text = re.sub(r' \n', '\n', full_text)
         full_text = re.sub(r'\n ', '\n', full_text)
-        # Ensure exactly 2 newlines for a paragraph break, but no more (prevents huge gaps)
         full_text = re.sub(r'\n{3,}', '\n\n', full_text)
         full_text = re.sub(r'[ ]{2,}', ' ', full_text)
 
