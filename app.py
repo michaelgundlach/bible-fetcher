@@ -14,6 +14,12 @@ def get_bible_passage(passage, version, include_verses=True):
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
 
+    # Default fallback if scraping fails
+    result_data = {
+        "text": "",
+        "ref": passage  # Default to user input (e.g. "John 8:12")
+    }
+
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -21,15 +27,21 @@ def get_bible_passage(passage, version, include_verses=True):
         soup = BeautifulSoup(response.text, 'html.parser')
 
         # --- FIX: Aggressively remove footer sections BEFORE processing ---
-        # This prevents the script from accidentally scraping the text inside
-        # the "Footnotes" or "Cross References" sections at the bottom of the page.
         for footer in soup.find_all('div', class_=['footnotes', 'crossrefs', 'publisher-info-bottom']):
             footer.decompose()
+
+        # --- NEW: Scrape the localized reference name ---
+        # We look for the "dropdown-display-text" which contains the canonical name (e.g. "요한복음 8:12")
+        ref_div = soup.find("div", class_="dropdown-display-text")
+        if ref_div:
+            # Update our reference to the one found on the page
+            result_data["ref"] = ref_div.get_text().strip()
 
         container = soup.find("div", class_="passage-content") or soup.find("div", class_="passage-text")
 
         if not container:
-            return f"Error: Could not find text for version '{version}'."
+            result_data["text"] = f"Error: Could not find text for version '{version}'."
+            return result_data
 
         passage_pieces = []
         tags_to_find = re.compile(r'^h[34]$|^span$')
@@ -39,6 +51,9 @@ def get_bible_passage(passage, version, include_verses=True):
             # --- CASE A: Header (Bold Title) ---
             if element.name in ['h3', 'h4']:
                 heading_text = element.get_text().strip()
+                if heading_text.lower() in ['cross references', 'footnotes', 'bibliography']:
+                    continue
+
                 if heading_text:
                     passage_pieces.append(f"\n\n<strong>{heading_text}</strong>\n")
                 continue
@@ -51,7 +66,7 @@ def get_bible_passage(passage, version, include_verses=True):
             is_verse_text = any('text' in c for c in class_list)
 
             if is_verse_text:
-                # 1. Remove Junk (Footnotes, Cross-refs inline)
+                # 1. Remove Junk
                 for junk in element.find_all(['sup', 'div'], class_=['footnote', 'crossreference', 'bibleref', 'footnotes']):
                     junk.decompose()
 
@@ -63,13 +78,12 @@ def get_bible_passage(passage, version, include_verses=True):
                         num.decompose()
                 else:
                     for num in number_tags:
-                        # Style the number gray and mark it to be kept
                         num.name = 'span'
                         num['style'] = "color: #999; font-size: 0.75em; font-weight: bold; margin-right: 3px;"
                         num['data-keep'] = "true"
                         del num['class']
 
-                # 3. Flatten the HTML (Unwrap tags)
+                # 3. Flatten the HTML
                 for tag in element.find_all(True):
                     if tag.has_attr('data-keep'):
                         continue
@@ -92,10 +106,12 @@ def get_bible_passage(passage, version, include_verses=True):
         full_text = re.sub(r'\n{3,}', '\n\n', full_text)
         full_text = re.sub(r'[ ]{2,}', ' ', full_text)
 
-        return full_text.strip()
+        result_data["text"] = full_text.strip()
+        return result_data
 
     except Exception as e:
-        return f"An error occurred with version {version}: {e}"
+        result_data["text"] = f"An error occurred with version {version}: {e}"
+        return result_data
 
 # --- HTML Template ---
 HTML_TEMPLATE = """
@@ -143,9 +159,9 @@ HTML_TEMPLATE = """
 
     {% if results %}
         <div id="results-container">
-            {% for v, text in results.items() %}
+            {% for v, data in results.items() %}
                 <div class="result">
-                    <div id="copy-target-{{ loop.index }}"><h3 class="version-title">{{ v }} - {{ passage }}</h3><div class="passage-content">{{ text | safe }}</div></div>
+                    <div id="copy-target-{{ loop.index }}"><h3 class="version-title">{{ v }} - {{ data.ref }}</h3><div class="passage-content">{{ data.text | safe }}</div></div>
 
                     <button class="copy-btn" onclick="copyRichText('copy-target-{{ loop.index }}', this)">Copy</button>
                 </div>
@@ -213,6 +229,7 @@ def home():
         version_list = [v.upper() for v in re.split(r'[,\s]+', versions_str) if v]
 
         for v in version_list:
+            # results[v] is now a dictionary: {'text': ..., 'ref': ...}
             results[v] = get_bible_passage(passage, v, include_verses)
 
     return render_template_string(HTML_TEMPLATE, results=results, passage=passage, versions_str=versions_str, include_verses=include_verses)
