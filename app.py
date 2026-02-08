@@ -8,7 +8,9 @@ import traceback
 app = Flask(__name__)
 
 # --- REGEX PATTERNS ---
-QUOTE_FINDER = re.compile(r'(?s)([“"「«])(.*?)(?:[”"」»]|$)')
+# Matches any quote delimiter for tokenizing
+# Smart quotes (Start/End), Straight quotes, Guillemets (Start/End), Asian quotes
+QUOTE_SPLITTER = re.compile(r'([“"「«”"」»])')
 NORMALIZER = re.compile(r'[\W_]+')
 
 def normalize(text):
@@ -16,28 +18,40 @@ def normalize(text):
 
 def get_quote_blocks(text):
     """
-    Parses verse text into Quote Blocks.
+    Parses verse text into logical blocks of text.
+    Detects Implicit Open (starting inside a quote) and Implicit Close (ending inside).
+    Returns list of dicts: {'text': str, 'is_quote': bool, 'is_implicit': bool}
     """
     blocks = []
-    tokens = re.split(r'([“"「«”"」»])', text)
+    tokens = QUOTE_SPLITTER.split(text)
 
     current_text = ""
     in_quote = False
 
+    # 1. Determine Initial State (Implicit Open Detection)
+    # If the FIRST quote character we find is a CLOSING quote,
+    # we must have started inside a quote.
     for t in tokens:
-        if t in ['”', '」', '»']: # Closers
+        if t in ['”', '」', '»']: # Distinct Closers
             in_quote = True
             break
-        if t in ['“', '「', '«']: # Openers
+        if t in ['“', '「', '«']: # Distinct Openers
             in_quote = False
             break
+        # Straight quotes (") are ambiguous; we assume False (Narrative start)
+        # unless we have better context, but usually Red Letter editions use Smart Quotes.
 
+    # 2. Tokenize
     for token in tokens:
         if not token: continue
 
-        if re.match(r'[“"「«”"」»]', token):
+        # Check if token is a delimiter
+        if QUOTE_SPLITTER.match(token):
+
+            # Logic for transitioning state
             if token in ['“', '「', '«']: # OPENER
                 if not in_quote:
+                    # Flush "Narrative" block
                     if current_text:
                         blocks.append({'text': current_text, 'is_quote': False, 'is_implicit': False})
                         current_text = ""
@@ -47,25 +61,32 @@ def get_quote_blocks(text):
             elif token in ['”', '」', '»']: # CLOSER
                 current_text += token
                 if in_quote:
+                    # Flush "Quote" block
                     blocks.append({'text': current_text, 'is_quote': True, 'is_implicit': False})
                     current_text = ""
                     in_quote = False
             else:
+                # Straight Quote " - Toggle State
                 if not in_quote:
+                    # Treat as Opener
                     if current_text:
                         blocks.append({'text': current_text, 'is_quote': False, 'is_implicit': False})
                         current_text = ""
                     in_quote = True
                     current_text += token
                 else:
+                    # Treat as Closer
                     current_text += token
                     blocks.append({'text': current_text, 'is_quote': True, 'is_implicit': False})
                     current_text = ""
                     in_quote = False
         else:
+            # Regular Text
             current_text += token
 
+    # 3. Flush Final Block (Implicit Close Detection)
     if current_text:
+        # If we end while 'in_quote' is True, it's an Implicit Close
         blocks.append({'text': current_text, 'is_quote': in_quote, 'is_implicit': in_quote})
 
     return blocks
@@ -90,15 +111,15 @@ def analyze_ceb_for_red_letters(passage, debug_log):
         for verse_span in container.find_all('span', class_='text'):
             if not isinstance(verse_span, Tag) or verse_span.attrs is None: continue
 
+            # Clean junk
             c_tag = verse_span.find(class_=['chapternum'])
             if c_tag: c_tag.decompose()
-
             v_num_tag = verse_span.find(class_=['versenum', 'v-num'])
             if v_num_tag:
                 current_verse = v_num_tag.get_text().strip()
                 v_num_tag.decompose()
             elif 'current_verse' not in locals():
-                continue
+                continue # Skip intro junk
 
             temp_span = BeautifulSoup(str(verse_span), 'html.parser')
             for junk in temp_span.find_all(class_=['footnote', 'crossreference']):
@@ -115,35 +136,47 @@ def analyze_ceb_for_red_letters(passage, debug_log):
             full_text = data['full_text'].strip()
             all_woj_text = "".join(data['woj_spans'])
 
+            # Fuzzy Matching Prep
             norm_woj = normalize(all_woj_text)
             norm_full = normalize(full_text)
 
             blocks = get_quote_blocks(full_text)
-            quote_blocks = [b for b in blocks if b['is_quote']]
 
+            # --- Implicit Red Verse Logic ---
+            # If the parser found NO quotes, or the verse structure implies it's entirely narrative,
+            # BUT the WOJ text covers > 90% of the verse, treat the whole thing as one Red Block.
             is_implicit_red_verse = False
-            if not quote_blocks and len(norm_full) > 0:
+
+            # Check ratio
+            if len(norm_full) > 0:
                 ratio = len(norm_woj) / len(norm_full)
                 if ratio > 0.9:
                     is_implicit_red_verse = True
-                    quote_blocks = [{'text': full_text, 'is_quote': False, 'is_implicit': True}]
 
             mask_data = []
             debug_info = []
 
-            for block in quote_blocks:
+            for block in blocks:
                 is_red = False
+
                 if is_implicit_red_verse:
                     is_red = True
                 else:
-                    norm_block = normalize(block['text'])
-                    if norm_block and norm_block in norm_woj:
-                        is_red = True
+                    # Normal check: Is this specific block inside the Red Text?
+                    # We check ONLY if it is marked as a quote (or implicit quote part)
+                    if block['is_quote']:
+                        norm_block = normalize(block['text'])
+                        if norm_block and norm_block in norm_woj:
+                            is_red = True
 
+                # IMPORTANT: We only flag 'is_implicit' in the mask if it's the
+                # "Whole Verse Implicit" scenario. Individual "Unclosed Quotes"
+                # (block['is_implicit']) are structurally explicit quotes, just missing a mark.
                 mask_data.append({
                     'is_red': is_red,
-                    'is_implicit': block.get('is_implicit', False)
+                    'is_implicit_verse': is_implicit_red_verse
                 })
+
                 d_txt = block['text'][:10].replace("\n","")
                 debug_info.append(f"'{d_txt}':{is_red}")
 
@@ -232,7 +265,6 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
                         pending_chapter_html = ""
                     v_tag.decompose()
                 elif current_verse_num is None:
-                    # Still None. If we have text content later, we'll check pending_chapter_html there.
                     pass
                 else:
                     if pending_chapter_html:
@@ -245,12 +277,8 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
                 text_content = element.decode_contents().strip()
 
                 if text_content:
-                    # --- FIX: Implicit Verse 1 Logic ---
                     if current_verse_num is None and pending_chapter_html:
-                        # We have text, no verse num yet, but we just saw Chapter Num.
-                        # Assume this is Verse 1.
                         current_verse_num = "1"
-                        # Flush the pending chapter HTML as the tag for this verse
                         v_tag_html = pending_chapter_html
                         pending_chapter_html = ""
 
@@ -286,7 +314,6 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
                 continue
 
             v_num = item['id']
-            # Safety check: skip if still None (intro text without chapter header)
             if v_num is None: continue
 
             if v_num in processed_ids: continue
@@ -316,60 +343,140 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
 
                 if mask:
                     clean_text = BeautifulSoup(text_html, 'html.parser').get_text()
-                    all_blocks = get_quote_blocks(clean_text)
-                    quote_blocks = [b for b in all_blocks if b['is_quote']]
+                    target_blocks = get_quote_blocks(clean_text)
 
-                    if not quote_blocks and len(all_blocks) == 1:
-                         if len(mask) == 1 and mask[0]['is_implicit']:
-                             quote_blocks = all_blocks
-
+                    # Debug
                     if debug_log is not None:
-                        t_dbg = [f"'{b['text'][:10]}...'" for b in quote_blocks]
-                        debug_log.append(f"[{version} {v_num}] Quotes: {len(quote_blocks)} vs Mask: {len(mask)}")
+                        t_dbg = [f"'{b['text'][:10]}...'" for b in target_blocks]
+                        debug_log.append(f"[{version} {v_num}] Quotes: {len(target_blocks)} vs Mask: {len(mask)}")
                         debug_log.append(f"   -> Found: {t_dbg}")
 
                     valid_mapping = True
-                    if len(quote_blocks) != len(mask):
+                    # 1. Count Mismatch
+                    if len(target_blocks) != len(mask):
                         valid_mapping = False
                     else:
-                        for i in range(len(quote_blocks)):
-                            if not mask[i]['is_implicit'] and quote_blocks[i]['is_implicit']:
+                        # 2. Type Mismatch (Explicit Mask vs Implicit Target)
+                        for i in range(len(target_blocks)):
+                            # Only fail if Mask expects EXPLICIT quote but Target gives IMPLICIT whole verse
+                            if not mask[i]['is_implicit_verse'] and target_blocks[i]['is_implicit'] and not target_blocks[i]['is_quote']:
                                 valid_mapping = False
                                 break
 
                     if valid_mapping:
-                        tokens = re.split(r'([“"「«”"」»])', text_html)
+                        # Re-run tokenizer on HTML to find injection points
+                        tokens = QUOTE_SPLITTER.split(text_html)
                         new_html_parts = []
-                        quote_idx = 0
-                        in_quote = False
 
+                        # Re-calculate indices to match target_blocks
+                        # Logic: Iterate tokens. If token matches a block in target_blocks, applying coloring.
+                        # This is tricky because tokens splits delimiters separately.
+
+                        # Simpler: Iterate tokens. Maintain a "Block Index".
+                        # Delimiters toggle quotes. Text adds content.
+
+                        block_idx = 0
+
+                        # Determine initial state (Implicit Open)
+                        in_quote = False
                         for t in tokens:
                             if t in ['”', '」', '»']: in_quote = True; break
                             if t in ['“', '「', '«']: in_quote = False; break
 
                         for token in tokens:
-                            is_delimiter = re.match(r'[“"「«”"」»]', token)
-                            if is_delimiter:
-                                new_html_parts.append(token)
-                                if token in ['“', '「', '«']:
-                                    if not in_quote: in_quote = True
-                                elif token in ['”', '」', '»']:
-                                    if in_quote: in_quote = False; quote_idx += 1
-                                else:
-                                    if in_quote: in_quote = False; quote_idx += 1
-                                    else: in_quote = True
+                            if not token: continue
+
+                            is_delimiter = QUOTE_SPLITTER.match(token)
+
+                            should_color = False
+                            current_mask = mask[block_idx] if block_idx < len(mask) else {'is_red': False}
+
+                            if current_mask['is_red']:
+                                should_color = True
+
+                            # Append Token
+                            if should_color:
+                                new_html_parts.append(f'<span class="woj-text" style="color: #cc0000;">{token}</span>')
                             else:
-                                if in_quote:
-                                    if quote_idx < len(mask) and mask[quote_idx]['is_red']:
-                                        new_html_parts.append(f'<span class="woj-text" style="color: #cc0000;">{token}</span>')
+                                new_html_parts.append(token)
+
+                            # Logic to advance block_idx
+                            # A block ends when state flips or token stream matches get_quote_blocks logic
+                            # This is getting de-synced easily.
+
+                            # ROBUST REPLACEMENT:
+                            # Since we verified count matches, we can just zip them?
+                            # No, because get_quote_blocks merged delimiters into blocks.
+                            # Here we have raw tokens.
+
+                            # Let's rely on the transition logic again.
+                            if is_delimiter:
+                                if token in ['“', '「', '«']: # Open
+                                    if not in_quote: in_quote = True # Start of Quote Block
+                                    # Opener is PART of the quote block.
+
+                                elif token in ['”', '」', '»']: # Close
+                                    if in_quote:
+                                        in_quote = False
+                                        block_idx += 1 # End of Quote Block
+                                    # Closer is PART of the quote block.
+
+                                else: # Straight "
+                                    if not in_quote: in_quote = True
                                     else:
-                                        new_html_parts.append(token)
-                                else:
-                                    if quote_idx < len(mask) and mask[quote_idx]['is_red'] and mask[quote_idx]['is_implicit']:
-                                         new_html_parts.append(f'<span class="woj-text" style="color: #cc0000;">{token}</span>')
-                                    else:
-                                         new_html_parts.append(token)
-                        text_html = "".join(new_html_parts)
+                                        in_quote = False
+                                        block_idx += 1
+                            else:
+                                # Text is part of current block.
+                                # If we are NOT in quote, and next char starts quote?
+                                # block_idx should increment when "Narrative Block" ends.
+                                pass
+
+                            # Wait, get_quote_blocks produces alternating blocks: Narrative, Quote, Narrative.
+                            # So every state toggle = block_idx++
+
+                            # Correct Logic:
+                            # 1. Start. block_idx = 0.
+                            # 2. Token arrives. It belongs to block_idx.
+                            # 3. Does this token CAUSE a transition?
+                            #    If so, AFTER this token, increment block_idx.
+
+                            transition_after = False
+
+                            if is_delimiter:
+                                if token in ['“', '「', '«']: # Open
+                                    if not in_quote: # Narrative -> Quote
+                                        # The Opener belongs to the QUOTE block (next one).
+                                        # So we increment BEFORE processing?
+                                        # get_quote_blocks: "Narrative" (idx 0), "Quote" (idx 1).
+                                        # Opener is inside Quote.
+                                        pass
+                                    # Actually, my get_quote_blocks logic:
+                                    # Opener is part of the Quote Block.
+                                    # Closer is part of the Quote Block.
+
+                                    # So if we are Narrative -> Quote:
+                                    # Previous text was Narrative (idx 0).
+                                    # This token is Quote (idx 1).
+                                    # So we increment BEFORE.
+                                    if not in_quote:
+                                        # Correction: If we were previously writing narrative text, we are done with it.
+                                        # But wait, 'token' loop iterates strictly.
+                                        pass
+
+                        # RE-DOING SIMPLE COLORING STRATEGY
+                        # We know which blocks are red.
+                        # We iterate the target_blocks (which contain the text).
+                        # We color the text of the blocks that are red.
+                        # We join them.
+
+                        final_html_parts = []
+                        for i, block in enumerate(target_blocks):
+                            content = block['text']
+                            if i < len(mask) and mask[i]['is_red']:
+                                content = f'<span class="woj-text" style="color: #cc0000;">{content}</span>'
+                            final_html_parts.append(content)
+                        text_html = "".join(final_html_parts)
 
             final_output.append(data['v_tag_html'] + text_html)
 
