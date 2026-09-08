@@ -3,7 +3,7 @@ from flask import Flask, render_template_string, request
 import requests
 from bs4 import BeautifulSoup, Tag
 import re
-import traceback
+
 
 app = Flask(__name__)
 
@@ -198,7 +198,11 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
 
     try:
         response = requests.get(url, headers=headers)
-        response.raise_for_status()
+        if response.status_code != 200:
+            result_data["text"] = f"Error: BibleGateway returned {response.status_code} for version '{version}'."
+            if debug_log: debug_log.append(f"[{version}] HTTP {response.status_code} from BibleGateway")
+            return result_data
+
         soup = BeautifulSoup(response.text, 'html.parser')
 
         for footer in soup.find_all('div', class_=['footnotes', 'crossrefs', 'publisher-info-bottom']):
@@ -490,8 +494,8 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
         return result_data
 
     except Exception as e:
-        result_data["text"] = f"An error occurred with version {version}: {e}"
-        if debug_log: debug_log.append(f"Error: {e} \n {traceback.format_exc()}")
+        result_data["text"] = f"Error fetching {version}: {e}"
+        if debug_log: debug_log.append(f"[{version}] {type(e).__name__}: {e}")
         return result_data
 
 HTML_TEMPLATE = """
