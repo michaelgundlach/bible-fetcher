@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string, request, make_response
 import requests
 from bs4 import BeautifulSoup, Tag
 import re
@@ -515,6 +515,8 @@ HTML_TEMPLATE = """
         .hide-red-letters .woj-text { color: inherit !important; }
         .debug-box { margin-top: 30px; background: #333; color: #0f0; padding: 15px; font-family: monospace; font-size: 12px; border-radius: 5px; overflow-x: auto; white-space: pre; }
         label { cursor: pointer; display: flex; align-items: center; gap: 5px; font-weight: 500; }
+        .checkbox-row { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
+        .version-check { background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 4px 10px; font-weight: 500; }
         #spinner { display: none; margin: 15px 0; font-weight: bold; color: #007bff; }
     </style>
 </head>
@@ -523,7 +525,16 @@ HTML_TEMPLATE = """
     <form id="fetchForm" method="POST">
         <div class="controls">
             <input type="text" name="passage" placeholder="e.g. John 8:12" required value="{{ passage }}">
-            <input type="text" name="versions" placeholder="e.g. KOERV NIV" required value="{{ versions_str }}">
+            <div id="versionCheckboxes" class="checkbox-row">
+                <label class="version-check"><input type="checkbox" class="version-cb" value="CEB"> English</label>
+                <label class="version-check"><input type="checkbox" class="version-cb" value="KOERV"> Korean</label>
+                <label class="version-check"><input type="checkbox" class="version-cb" value="NVI-PT"> Portuguese</label>
+                <label class="version-check"><input type="checkbox" class="version-cb" value="NBLA"> Spanish</label>
+                <label class="version-check"><input type="checkbox" class="version-cb" value="CNVS"> Chinese</label>
+                <label class="version-check"><input type="checkbox" class="version-cb" value="JLB"> Japanese</label>
+                <label class="version-check"><input type="checkbox" class="version-cb" value="LCB"> Luganda</label>
+            </div>
+            <input type="text" name="versions" id="versionsInput" placeholder="e.g. NVI-PT,CNVS,CEB" required value="{{ versions_str }}">
             <div style="display:flex; flex-direction:column; gap:5px;">
                 <label><input type="checkbox" name="include_verses" {% if include_verses %}checked{% endif %}> Verse Numbers</label>
                 <label><input type="checkbox" id="redLetterToggle" name="red_letter" {% if red_letter %}checked{% endif %}> Jesus's words in red</label>
@@ -560,6 +571,22 @@ HTML_TEMPLATE = """
             toggle.onchange = function() {
                 container.classList.toggle('hide-red-letters', !this.checked);
             };
+        }
+        var versionsInput = document.getElementById('versionsInput');
+        var versionCbs = document.querySelectorAll('.version-cb');
+        function syncVersionsInput() {
+            var selected = [];
+            versionCbs.forEach(function(cb) { if (cb.checked) selected.push(cb.value); });
+            versionsInput.value = selected.join(',');
+        }
+        versionCbs.forEach(function(cb) { cb.addEventListener('change', syncVersionsInput); });
+        if (versionsInput.value.trim()) {
+            var present = versionsInput.value.toUpperCase().split(/[,\s]+/).filter(Boolean);
+            versionCbs.forEach(function(cb) {
+                if (present.indexOf(cb.value) !== -1) cb.checked = true;
+            });
+        } else {
+            syncVersionsInput();
         }
         async function copyRichText(elementId, btn) {
             const element = document.getElementById(elementId);
@@ -610,6 +637,16 @@ def home():
                 data = get_bible_passage(p, v, include_verses, ceb_map, debug_logs)
                 version_block['passages'].append(data)
             results.append(version_block)
+
+        rendered = render_template_string(HTML_TEMPLATE, results=results, debug_logs=debug_logs, passage=passage, versions_str=versions_str, include_verses=include_verses, red_letter=red_letter)
+        response = make_response(rendered)
+        max_age = 180 * 24 * 3600
+        response.set_cookie('last_passage', passage or '', max_age=max_age)
+        response.set_cookie('last_versions', versions_str or '', max_age=max_age)
+        return response
+
+    passage = request.cookies.get('last_passage', '')
+    versions_str = request.cookies.get('last_versions', '')
 
     return render_template_string(HTML_TEMPLATE, results=results, debug_logs=debug_logs, passage=passage, versions_str=versions_str, include_verses=include_verses, red_letter=red_letter)
 
