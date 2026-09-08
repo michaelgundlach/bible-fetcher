@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from flask import Flask, render_template_string, request, make_response
+from flask import Flask, render_template_string, request, make_response, jsonify
 import requests
 from bs4 import BeautifulSoup, Tag
 import re
@@ -498,7 +498,15 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
         if debug_log: debug_log.append(f"[{version}] {type(e).__name__}: {e}")
         return result_data
 
-HTML_TEMPLATE = """
+def render_version_html(version, data):
+    text = data.get('text', '')
+    if text.startswith('Error'):
+        return f'<div class="fetch-error">{text}</div>'
+    ref = data.get('ref', '')
+    heading = f'{version} - {ref}' if ref else version
+    return f'<h3 class="version-title">{heading}</h3><div class="passage-content">{text}</div>'
+
+HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html>
 <head>
@@ -517,6 +525,10 @@ HTML_TEMPLATE = """
         label { cursor: pointer; display: flex; align-items: center; gap: 5px; font-weight: 500; }
         .checkbox-row { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
         .version-check { background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 4px 10px; font-weight: 500; }
+        .passage-slot { margin-bottom: 12px; }
+        .passage-slot:last-child { margin-bottom: 0; }
+        .slot-placeholder { color: #999; font-style: italic; }
+        .fetch-error { color: #c0392b; font-style: italic; }
         #spinner { display: none; margin: 15px 0; font-weight: bold; color: #007bff; }
     </style>
 </head>
@@ -544,34 +556,34 @@ HTML_TEMPLATE = """
     </form>
     <div id="spinner">Processing...</div>
 
-    {% if results %}
-        <div id="results-container" class="{% if not red_letter %}hide-red-letters{% endif %}">
-            {% for v_block in results %}
-                <div class="result">
-                    <div id="copy-target-{{ loop.index }}">{% for item in v_block.passages %}<h3 class="version-title">{{ v_block.name }} - {{ item.ref }}</h3><div class="passage-content">{{ item.text | safe }}</div>{% if not loop.last %}<br><br>{% endif %}{% endfor %}</div>
-                    <button class="copy-btn" onclick="copyRichText('copy-target-{{ loop.index }}', this)">Copy All {{ v_block.name }}</button>
-                </div>
-            {% endfor %}
-        </div>
-        <details>
-            <summary><strong>Debug Log</strong></summary>
-            <div class="debug-box">{% for log in debug_logs %}{{ log }}
+    <div id="results-container" class="{% if not red_letter %}hide-red-letters{% endif %}">
+        {% for v_block in results %}
+            <div class="result">
+                <div id="copy-target-{{ loop.index }}">{% for item in v_block.passages %}{{ item.html | safe }}{% if not loop.last %}<br><br>{% endif %}{% endfor %}</div>
+                <button class="copy-btn" onclick="copyRichText('copy-target-{{ loop.index }}', this)">Copy All {{ v_block.name }}</button>
+            </div>
+        {% endfor %}
+    </div>
+    <details id="debugDetails" {% if not debug_logs %}hidden{% endif %}>
+        <summary><strong>Debug Log</strong></summary>
+        <div class="debug-box" id="debugBox">{% for log in debug_logs %}{{ log }}
 {% endfor %}</div>
-        </details>
-    {% endif %}
+    </details>
     <script>
-        document.getElementById('fetchForm').onsubmit = function() {
-            document.getElementById('spinner').style.display = 'block';
-            document.getElementById('submitBtn').disabled = true;
-            document.getElementById('submitBtn').innerText = 'Fetching...';
-        };
-        var toggle = document.getElementById('redLetterToggle');
-        var container = document.getElementById('results-container');
-        if (toggle && container) {
-            toggle.onchange = function() {
-                container.classList.toggle('hide-red-letters', !this.checked);
+        var fetchForm = document.getElementById('fetchForm');
+        var spinner = document.getElementById('spinner');
+        var submitBtn = document.getElementById('submitBtn');
+        var resultsContainer = document.getElementById('results-container');
+        var debugBox = document.getElementById('debugBox');
+        var debugDetails = document.getElementById('debugDetails');
+        var redLetterToggle = document.getElementById('redLetterToggle');
+
+        if (redLetterToggle && resultsContainer) {
+            redLetterToggle.onchange = function() {
+                resultsContainer.classList.toggle('hide-red-letters', !this.checked);
             };
         }
+
         var versionsInput = document.getElementById('versionsInput');
         var versionCbs = document.querySelectorAll('.version-cb');
         function syncVersionsInput() {
@@ -588,6 +600,105 @@ HTML_TEMPLATE = """
         } else {
             syncVersionsInput();
         }
+
+        fetchForm.onsubmit = function(e) {
+            e.preventDefault();
+
+            var passageRaw = document.querySelector('input[name="passage"]').value.trim();
+            var versionsRaw = versionsInput.value.trim();
+            var includeVerses = document.querySelector('input[name="include_verses"]').checked ? '1' : '0';
+            var redLetter = redLetterToggle.checked ? '1' : '0';
+
+            if (!passageRaw || !versionsRaw) return;
+
+            // Remember the form state (180 days) so it survives reloads/restarts
+            var maxAge = 180 * 24 * 3600;
+            document.cookie = 'last_passage=' + encodeURIComponent(passageRaw) + '; max-age=' + maxAge + '; path=/';
+            document.cookie = 'last_versions=' + encodeURIComponent(versionsRaw) + '; max-age=' + maxAge + '; path=/';
+
+            var passages = passageRaw.split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+            var versions = versionsRaw.toUpperCase().split(/[,\s]+/).filter(Boolean);
+
+            resultsContainer.classList.toggle('hide-red-letters', !redLetterToggle.checked);
+            resultsContainer.innerHTML = '';
+            if (debugBox) debugBox.textContent = '';
+            if (debugDetails) debugDetails.hidden = true;
+
+            // Pre-create one result block per version, with a slot per passage (keeps ordering)
+            versions.forEach(function(vcode) {
+                var resultDiv = document.createElement('div');
+                resultDiv.className = 'result';
+
+                var copyTarget = document.createElement('div');
+                copyTarget.id = 'copy-target-' + vcode;
+                passages.forEach(function(p, i) {
+                    var slot = document.createElement('div');
+                    slot.className = 'passage-slot';
+                    slot.id = 'slot-' + vcode + '-' + i;
+                    slot.innerHTML = '<span class="slot-placeholder">Waiting&hellip;</span>';
+                    copyTarget.appendChild(slot);
+                });
+                resultDiv.appendChild(copyTarget);
+
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'copy-btn';
+                btn.onclick = function() { copyRichText('copy-target-' + vcode, this); };
+                btn.innerText = 'Copy All ' + vcode;
+                resultDiv.appendChild(btn);
+
+                resultsContainer.appendChild(resultDiv);
+            });
+
+            spinner.style.display = 'block';
+            submitBtn.disabled = true;
+            submitBtn.innerText = 'Fetching...';
+
+            var pending = passages.length;
+
+            function failSlot(i, versionsList, msg) {
+                versionsList.forEach(function(vcode) {
+                    var slot = document.getElementById('slot-' + vcode + '-' + i);
+                    if (slot) slot.innerHTML = '<div class="fetch-error">' + msg + '</div>';
+                });
+            }
+
+            passages.forEach(function(p, i) {
+                var url = '/fetch?passage=' + encodeURIComponent(p)
+                    + '&versions=' + encodeURIComponent(versionsRaw)
+                    + '&include_verses=' + includeVerses
+                    + '&red_letter=' + redLetter;
+
+                fetch(url)
+                    .then(function(res) {
+                        if (!res.ok) throw new Error('Request failed (' + res.status + ')');
+                        return res.json();
+                    })
+                    .then(function(data) {
+                        if (data.error) throw new Error(data.error);
+                        Object.keys(data.versions).forEach(function(vcode) {
+                            var slot = document.getElementById('slot-' + vcode + '-' + i);
+                            if (slot) slot.innerHTML = data.versions[vcode].html;
+                        });
+                        if (debugBox && data.debug && data.debug.length) {
+                            debugBox.textContent += data.debug.join('\n') + '\n';
+                            if (debugDetails) debugDetails.hidden = false;
+                        }
+                    })
+                    .catch(function(err) {
+                        failSlot(i, versions, 'Failed to fetch: ' + err.message);
+                    })
+                    .then(function() {
+                        pending--;
+                        if (pending <= 0) {
+                            spinner.style.display = 'none';
+                            submitBtn.disabled = false;
+                            submitBtn.innerText = 'Fetch';
+                        }
+                    });
+            });
+        };
+
         async function copyRichText(elementId, btn) {
             const element = document.getElementById(elementId);
             const isRedOn = document.getElementById('redLetterToggle').checked;
@@ -630,11 +741,16 @@ def home():
         version_list = [v.upper() for v in re.split(r'[,\s]+', versions_str) if v]
         passage_list = [p.strip() for p in passage.split(',') if p.strip()]
 
+        # Fetch the red-letter mask once per passage, not once per (version, passage)
+        ceb_maps = {}
+        for p in passage_list:
+            ceb_maps[p] = analyze_ceb_for_red_letters(p, debug_logs) if red_letter else {}
+
         for v in version_list:
             version_block = {'name': v, 'passages': []}
             for p in passage_list:
-                ceb_map = analyze_ceb_for_red_letters(p, debug_logs)
-                data = get_bible_passage(p, v, include_verses, ceb_map, debug_logs)
+                data = get_bible_passage(p, v, include_verses, ceb_maps[p], debug_logs)
+                data['html'] = render_version_html(v, data)
                 version_block['passages'].append(data)
             results.append(version_block)
 
@@ -649,6 +765,30 @@ def home():
     versions_str = request.cookies.get('last_versions', '')
 
     return render_template_string(HTML_TEMPLATE, results=results, debug_logs=debug_logs, passage=passage, versions_str=versions_str, include_verses=include_verses, red_letter=red_letter)
+
+@app.route('/fetch')
+def fetch_passage():
+    passage = request.args.get('passage', '').strip()
+    versions_str = request.args.get('versions', '')
+    include_verses = request.args.get('include_verses', '1') == '1'
+    red_letter = request.args.get('red_letter', '1') == '1'
+
+    version_list = [v.upper() for v in re.split(r'[,\s]+', versions_str) if v]
+    if not passage or not version_list:
+        return jsonify({'error': 'Missing passage or versions'}), 400
+
+    debug_logs = []
+    ceb_map = analyze_ceb_for_red_letters(passage, debug_logs) if red_letter else {}
+
+    versions = {}
+    for v in version_list:
+        data = get_bible_passage(passage, v, include_verses, ceb_map, debug_logs)
+        versions[v] = {
+            'ref': data.get('ref', ''),
+            'html': render_version_html(v, data),
+        }
+
+    return jsonify({'passage': passage, 'versions': versions, 'debug': debug_logs})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001)
