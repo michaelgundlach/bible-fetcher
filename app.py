@@ -498,13 +498,14 @@ def get_bible_passage(passage, version, include_verses=True, red_letter_map=None
         if debug_log: debug_log.append(f"[{version}] {type(e).__name__}: {e}")
         return result_data
 
-def render_version_html(version, data):
+def render_version_html(data):
     text = data.get('text', '')
     if text.startswith('Error'):
         return f'<div class="fetch-error">{text}</div>'
     ref = data.get('ref', '')
-    heading = f'{version} - {ref}' if ref else version
-    return f'<h3 class="version-title">{heading}</h3><div class="passage-content">{text}</div>'
+    if ref:
+        return f'<h3 class="version-title">{ref}</h3><div class="passage-content">{text}</div>'
+    return f'<div class="passage-content">{text}</div>'
 
 HTML_TEMPLATE = r"""
 <!DOCTYPE html>
@@ -517,6 +518,7 @@ HTML_TEMPLATE = r"""
         input[type="text"] { padding: 10px; border: 1px solid #ccc; border-radius: 4px; flex: 1; min-width: 180px; }
         button { padding: 10px 25px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
         .result { background: #f8f9fa; padding: 25px; border-radius: 8px; margin-top: 20px; border-left: 5px solid #007bff; position: relative; }
+        .version-label { font-weight: bold; color: #007bff; margin-bottom: 10px; font-size: 1.1em; text-transform: uppercase; }
         h3.version-title { margin-top: 0; margin-bottom: 5px; color: #007bff; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
         .passage-content { white-space: pre-wrap; word-wrap: break-word; font-family: sans-serif; }
         .copy-btn { position: absolute; top: 15px; right: 15px; background: #6c757d; color: white; border: none; font-size: 12px; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
@@ -559,6 +561,7 @@ HTML_TEMPLATE = r"""
     <div id="results-container" class="{% if not red_letter %}hide-red-letters{% endif %}">
         {% for v_block in results %}
             <div class="result">
+                <div class="version-label">{{ v_block.name }}</div>
                 <div id="copy-target-{{ loop.index }}">{% for item in v_block.passages %}{{ item.html | safe }}{% if not loop.last %}<br><br>{% endif %}{% endfor %}</div>
                 <button class="copy-btn" onclick="copyRichText('copy-target-{{ loop.index }}', this)">Copy All {{ v_block.name }}</button>
             </div>
@@ -628,6 +631,11 @@ HTML_TEMPLATE = r"""
             versions.forEach(function(vcode) {
                 var resultDiv = document.createElement('div');
                 resultDiv.className = 'result';
+
+                var versionLabel = document.createElement('div');
+                versionLabel.className = 'version-label';
+                versionLabel.innerText = vcode;
+                resultDiv.appendChild(versionLabel);
 
                 var copyTarget = document.createElement('div');
                 copyTarget.id = 'copy-target-' + vcode;
@@ -750,7 +758,7 @@ def home():
             version_block = {'name': v, 'passages': []}
             for p in passage_list:
                 data = get_bible_passage(p, v, include_verses, ceb_maps[p], debug_logs)
-                data['html'] = render_version_html(v, data)
+                data['html'] = render_version_html(data)
                 version_block['passages'].append(data)
             results.append(version_block)
 
@@ -785,7 +793,7 @@ def fetch_passage():
         data = get_bible_passage(passage, v, include_verses, ceb_map, debug_logs)
         versions[v] = {
             'ref': data.get('ref', ''),
-            'html': render_version_html(v, data),
+            'html': render_version_html(data),
         }
 
     return jsonify({'passage': passage, 'versions': versions, 'debug': debug_logs})
