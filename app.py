@@ -3,6 +3,7 @@ from flask import Flask, render_template_string, request, make_response, jsonify
 import requests
 from bs4 import BeautifulSoup, Tag
 import re
+from urllib.parse import unquote as urlunquote
 
 
 app = Flask(__name__)
@@ -769,8 +770,8 @@ def home():
         response.set_cookie('last_versions', versions_str or '', max_age=max_age)
         return response
 
-    passage = request.cookies.get('last_passage', '')
-    versions_str = request.cookies.get('last_versions', '')
+    passage = urlunquote(request.cookies.get('last_passage', ''))
+    versions_str = urlunquote(request.cookies.get('last_versions', ''))
 
     return render_template_string(HTML_TEMPLATE, results=results, debug_logs=debug_logs, passage=passage, versions_str=versions_str, include_verses=include_verses, red_letter=red_letter)
 
